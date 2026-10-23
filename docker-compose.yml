@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  swing-trading-app:
+    build: .
+    container_name: ashare_swing_trading_system
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - APP_PORT=8501
+      - NO_PROXY=*
+      - LLM_ENABLED=false
+    volumes:
+      # 核心持久化目录挂载：保证容器更新重建后，SQLite 数据库、历史日线缓存与导出账本绝不丢失
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
