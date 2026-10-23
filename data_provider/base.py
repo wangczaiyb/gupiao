@@ -30,6 +30,19 @@ class StockQuoteItem:
     source: str = ""
 
 
+@dataclass
+class DataQualityReport:
+    symbol: str
+    source: str
+    fetch_time: str
+    trade_date: str
+    coverage_ratio: float  # 0.0 ~ 1.0 (非空完整率)
+    total_bars: int
+    is_fallback: bool
+    missing_fields: List[str]
+    warnings: List[str]
+
+
 class BaseDataProvider(ABC):
     """数据源适配器基类"""
 

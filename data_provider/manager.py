@@ -22,7 +22,8 @@ from core.rules import classify_symbol
 from core.stock_info import StockProfile, parse_stock_profile
 from data_provider.akshare_fetcher import AKShareFetcher
 from data_provider.baostock_fetcher import BaostockFetcher
-from data_provider.base import BaseDataProvider, StockQuoteItem
+from data_provider.base import BaseDataProvider, DataQualityReport, StockQuoteItem
+from data_provider.batch_scanner import ResumableBatchScanner
 from data_provider.csv_fetcher import CSVFetcher
 
 
@@ -42,6 +43,7 @@ class DataManager:
         self.akshare_fetcher = AKShareFetcher()
         self.baostock_fetcher = BaostockFetcher()
         self.csv_fetcher = CSVFetcher()
+        self.batch_scanner = ResumableBatchScanner(self.db_path)
 
         self._init_db()
 
@@ -273,6 +275,148 @@ class DataManager:
         df, _ = self.get_daily_bars(clean_sym, start_date=start_date, adjust="none", compute_indicators=False)
         return df
 
+    def get_stock_catalog(self, force_refresh: bool = False) -> List[StockProfile]:
+        """获取沪深北全市场证券目录 (支持本地 SQLite 持久化与增量同步)"""
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        profiles: List[StockProfile] = []
+
+        if not force_refresh:
+            with self._get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT symbol, name, exchange, board_key, board_name, updated_at FROM stock_basic_info")
+                rows = cur.fetchall()
+                if len(rows) > 100:  # 存在已缓存的全市场目录
+                    for r in rows:
+                        profiles.append(parse_stock_profile(r["symbol"], r["name"]))
+                    return profiles
+
+        # 尝试通过主数据源 AKShare 获取
+        raw_list = []
+        if self.akshare_fetcher.is_available():
+            try:
+                raw_list = self.akshare_fetcher.get_stock_list()
+            except Exception as e:
+                logger.warning(f"获取全市场证券目录失败: {e}")
+
+        # 若主接口成功获取，批量写入 SQLite 数据库
+        if len(raw_list) > 0:
+            with self._get_connection() as conn:
+                cur = conn.cursor()
+                records = [
+                    (item["symbol"], item["name"], item["exchange"], item["board_key"], item["board_name"], now_str)
+                    for item in raw_list
+                ]
+                cur.executemany("""
+                    INSERT OR REPLACE INTO stock_basic_info (symbol, name, exchange, board_key, board_name, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, records)
+                conn.commit()
+
+            for item in raw_list:
+                profiles.append(parse_stock_profile(item["symbol"], item["name"]))
+            return profiles
+
+        # 若无网络或离线环境，使用内置高质量沪深北代表池兜底
+        default_universe = [
+            ("600519", "贵州茅台"), ("601318", "中国平安"), ("600036", "招商银行"), ("601899", "紫金矿业"),
+            ("601138", "工业富联"), ("600900", "长江电力"), ("601088", "中国神华"), ("600030", "中信证券"),
+            ("000001", "平安银行"), ("002594", "比亚迪"), ("000333", "美的集团"), ("002475", "立讯精密"),
+            ("000858", "五粮液"), ("000002", "万科A"), ("002415", "海康威视"), ("000725", "京东方A"),
+            ("300750", "宁德时代"), ("300059", "东方财富"), ("300124", "汇川技术"), ("300760", "迈瑞医疗"),
+            ("688981", "中芯国际"), ("688012", "中微公司"), ("688111", "金山办公"), ("688041", "海光信息"),
+            ("920211", "倍益康"), ("920002", "万达轴承"), ("835185", "贝特瑞"), ("832023", "田野股份"),
+        ]
+        return [parse_stock_profile(s[0], s[1]) for s in default_universe]
+
+    def get_market_universe(
+        self,
+        scope: str = "WATCHLIST",
+        allowed_boards: Optional[List[str]] = None,
+        exclude_st: bool = True,
+        exclude_delisting: bool = True,
+        exclude_suspended: bool = True,
+        min_listing_days: int = 60,
+    ) -> List[StockProfile]:
+        """按股票池范围与交易规则筛选标的"""
+        from core.stock_info import filter_stock_pool
+
+        scope_upper = scope.upper()
+        if scope_upper in ("WATCHLIST", "自选股"):
+            raw_stocks = self.get_watchlist()
+            candidates = [parse_stock_profile(s["symbol"], s["name"]) for s in raw_stocks]
+        elif scope_upper in ("ALL", "全市场"):
+            candidates = self.get_stock_catalog()
+        elif scope_upper in ("INDEX_300", "沪深300"):
+            # 沪深300核心标的子集
+            syms = [
+                ("600519", "贵州茅台"), ("601318", "中国平安"), ("600036", "招商银行"), ("601899", "紫金矿业"),
+                ("601138", "工业富联"), ("600900", "长江电力"), ("601088", "中国神华"), ("600030", "中信证券"),
+                ("000001", "平安银行"), ("002594", "比亚迪"), ("000333", "美的集团"), ("002475", "立讯精密"),
+                ("000858", "五粮液"), ("300750", "宁德时代"), ("300059", "东方财富"), ("300760", "迈瑞医疗"),
+                ("688981", "中芯国际"), ("688041", "海光信息"),
+            ]
+            candidates = [parse_stock_profile(s[0], s[1]) for s in syms]
+        else:
+            candidates = self.get_stock_catalog()
+
+        return filter_stock_pool(
+            stocks=candidates,
+            allowed_boards=allowed_boards,
+            exclude_st=exclude_st,
+            exclude_delisting=exclude_delisting,
+            exclude_suspended=exclude_suspended,
+            min_listing_days=min_listing_days,
+        )
+
+    def inspect_data_quality(self, df: pd.DataFrame, symbol: str, source: str) -> DataQualityReport:
+        """检验数据质量与完整度，绝不用虚假或缺失数据冒充真实数据"""
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        missing_fields = []
+        warnings = []
+
+        if df is None or len(df) == 0:
+            return DataQualityReport(
+                symbol=symbol,
+                source=source,
+                fetch_time=now_str,
+                trade_date="",
+                coverage_ratio=0.0,
+                total_bars=0,
+                is_fallback=True,
+                missing_fields=["ALL"],
+                warnings=["行情数据为空或获取失败"],
+            )
+
+        required_cols = ["date", "open", "high", "low", "close", "volume"]
+        for col in required_cols:
+            if col not in df.columns:
+                missing_fields.append(col)
+
+        valid_rows = df.dropna(subset=[c for c in required_cols if c in df.columns])
+        total_bars = len(df)
+        coverage_ratio = len(valid_rows) / total_bars if total_bars > 0 else 0.0
+
+        if total_bars < 60:
+            warnings.append(f"历史数据不足 60 根 (当前 {total_bars} 根)，中长期均线与指标存在冷启动偏差")
+
+        if (df["volume"] == 0).sum() > 0:
+            zero_vol_days = int((df["volume"] == 0).sum())
+            warnings.append(f"历史存在 {zero_vol_days} 个交易日成交量为 0，需注意停牌或异常交易情况")
+
+        latest_date = str(df["date"].iloc[-1])[:10] if "date" in df.columns else ""
+
+        return DataQualityReport(
+            symbol=symbol,
+            source=source,
+            fetch_time=now_str,
+            trade_date=latest_date,
+            coverage_ratio=round(coverage_ratio, 4),
+            total_bars=total_bars,
+            is_fallback="备用" in source or "本地" in source,
+            missing_fields=missing_fields,
+            warnings=warnings,
+        )
+
     def get_coverage_report(self) -> Dict[str, Any]:
         """生成数据源覆盖情况与功能边界自检报告"""
         return {
@@ -288,3 +432,5 @@ class DataManager:
             "db_path": os.path.abspath(self.db_path),
             "proxy_protection": "已启用国内金融 API 代理绕行保护 (NO_PROXY=*)",
         }
+
+

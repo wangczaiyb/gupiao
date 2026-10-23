@@ -1,25 +1,28 @@
 """
-页面 3: 股票筛选与市场机会扫描 (Screener Page)
-特性：
-1. 可配置股票池：按板块 (主板/创业板/科创板/北交所)、流动性、上市时长与风险状态过滤
-2. 过滤 ST、*ST、退市整理与停牌标的
-3. 全市场扫描进度展示、本地缓存加速与失败自动重试
-4. 筛选结果清单：展示触发策略、入场参考价、止损位、盈亏比与一键加入自选
+页面 3: 智能选股与全市场波段机会扫描 (Screener Page)
+参考 AlphaSift 架构特性：
+1. 分层发现与确定性评分 (Certainty Score): 因子标准化与多策略加权综合排序
+2. 动态真实股票池: 告别硬编码假市场，支持自选股、沪深300、精选池与全市场动态证券目录
+3. 硬性风险前置过滤: 严格排除 ST、*ST、退市、停牌及次新炒作
+4. 明确展示入场条件、已满足事实、尚缺条件、止损依据及失效离场红线
+5. 支持一键加入自选股雷达
 """
 
-import time
 import streamlit as st
 import pandas as pd
 
-from core.stock_info import filter_stock_pool, parse_stock_profile
+from core.factors import compute_stock_factors
 from core.strategies.range_breakout import RangeBreakoutStrategy
+from core.strategies.rs_momentum import RSMomentumStrategy
 from core.strategies.trend_pullback import TrendPullbackStrategy
+from core.strategies.volatility_contraction import VolatilityContractionStrategy
 from data_provider.manager import DataManager
 from ui.components import render_board_badge
 
 
 def render_screener_page(data_manager: DataManager):
-    st.markdown("## 🔍 波段策略选股与机会扫描")
+    st.markdown("## 🔍 智能波段选股与机会扫描")
+    st.caption("AlphaSift 分层发现机制 · 确定性综合评分 · 严格因果事实拆解 · 真实动态证券池")
 
     # 1. 扫描与筛选条件配置
     with st.expander("⚙️ 股票池与筛选参数配置", expanded=True):
@@ -42,9 +45,25 @@ def render_screener_page(data_manager: DataManager):
         st.markdown("**3. 策略模型与扫描范围**")
         col_m1, col_m2 = st.columns([2, 2])
         with col_m1:
-            strat_type = st.selectbox("选择扫描策略", ["趋势回调观察策略", "区间突破观察策略"])
+            strat_name = st.selectbox(
+                "选择波段策略模型",
+                [
+                    "趋势回调观察策略 (Trend Pullback)",
+                    "区间突破观察策略 (Range Breakout)",
+                    "相对强度动量策略 (RS Momentum)",
+                    "波动收缩突破策略 (VCP Breakout)",
+                ],
+            )
         with col_m2:
-            scan_scope = st.selectbox("扫描股票池范围", ["自选股清单 (极速)", "核心代表性指数成分池 (~50只/快速)", "沪深北全市场样本池 (~150只/深度)"])
+            scan_scope = st.selectbox(
+                "扫描股票池范围",
+                [
+                    "自选股清单 (极速)",
+                    "沪深300指数核心池 (快速)",
+                    "精选沪深北代表池 (中速)",
+                    "沪深北全市场动态证券池 (深度扫描)",
+                ],
+            )
 
     # 准备目标股票池
     boards_selected = []
@@ -55,42 +74,17 @@ def render_screener_page(data_manager: DataManager):
     if inc_bse: boards_selected.append("BSE")
 
     # 触发扫描按钮
-    if st.button("🚀 开始扫描波段机会", type="primary", use_container_width=True):
-        candidate_profiles = []
-
-        if scan_scope == "自选股清单 (极速)":
-            raw_stocks = data_manager.get_watchlist()
-            for s in raw_stocks:
-                prof = parse_stock_profile(s["symbol"], s["name"])
-                candidate_profiles.append(prof)
+    if st.button("🚀 开始执行全流程扫描", type="primary", use_container_width=True):
+        scope_key = "WATCHLIST"
+        if "沪深300" in scan_scope:
+            scope_key = "INDEX_300"
+        elif "全市场" in scan_scope:
+            scope_key = "ALL"
         else:
-            # 内置高质量全市场代表性池
-            core_universe = [
-                # 沪市主板
-                ("600519", "贵州茅台"), ("601318", "中国平安"), ("600036", "招商银行"), ("601899", "紫金矿业"),
-                ("601138", "工业富联"), ("600900", "长江电力"), ("601088", "中国神华"), ("600030", "中信证券"),
-                ("601668", "中国建筑"), ("603288", "海天味业"), ("600436", "片仔癀"), ("601988", "中国银行"),
-                # 深市主板
-                ("000001", "平安银行"), ("002594", "比亚迪"), ("000333", "美的集团"), ("002475", "立讯精密"),
-                ("000858", "五粮液"), ("000002", "万科A"), ("002415", "海康威视"), ("000725", "京东方A"),
-                ("000651", "格力电器"), ("002371", "北方华创"), ("002241", "歌尔股份"), ("002142", "宁波银行"),
-                # 创业板
-                ("300750", "宁德时代"), ("300059", "东方财富"), ("300124", "汇川技术"), ("300760", "迈瑞医疗"),
-                ("300274", "阳光电源"), ("300014", "亿纬锂能"), ("300433", "蓝思科技"), ("300454", "深信服"),
-                # 科创板
-                ("688981", "中芯国际"), ("688012", "中微公司"), ("688111", "金山办公"), ("688041", "海光信息"),
-                ("688256", "寒武纪"), ("688223", "晶科能源"), ("688008", "澜起科技"), ("688692", "达梦数据"),
-                # 北交所
-                ("920211", "倍益康"), ("920002", "万达轴承"), ("835185", "贝特瑞"), ("832023", "田野股份"),
-                ("871642", "通易航天"), ("834599", "同力股份"), ("831010", "凯德石英"), ("833533", "骏创科技"),
-            ]
-            for sym, name in core_universe:
-                prof = parse_stock_profile(sym, name)
-                candidate_profiles.append(prof)
+            scope_key = "CORE"
 
-        # 过滤标的池
-        valid_profiles = filter_stock_pool(
-            stocks=candidate_profiles,
+        valid_profiles = data_manager.get_market_universe(
+            scope=scope_key,
             allowed_boards=boards_selected,
             exclude_st=exclude_st,
             exclude_delisting=exclude_delist,
@@ -98,13 +92,17 @@ def render_screener_page(data_manager: DataManager):
             min_listing_days=min_days,
         )
 
-        st.info(f"经过板块与风险前置过滤后，共有 **{len(valid_profiles)}** 只标的进入策略扫描执行序列...")
+        st.info(f"经过板块及硬风控规则筛选，共有 **{len(valid_profiles)}** 只真实合规标的进入策略扫描执行链路...")
 
-        # 选定策略
-        if strat_type == "趋势回调观察策略":
+        # 实例化策略
+        if "趋势回调" in strat_name:
             strategy = TrendPullbackStrategy()
-        else:
+        elif "区间突破" in strat_name:
             strategy = RangeBreakoutStrategy()
+        elif "相对强度" in strat_name:
+            strategy = RSMomentumStrategy()
+        else:
+            strategy = VolatilityContractionStrategy()
 
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -118,6 +116,9 @@ def render_screener_page(data_manager: DataManager):
             if len(df) >= 30:
                 sig = strategy.evaluate_latest(df, p.symbol)
                 latest_p = float(df["close"].iloc[-1])
+                factors = compute_stock_factors(df, p.symbol)
+                certainty = factors.certainty_score if factors else getattr(sig, "priority_score", 50.0)
+
                 results.append({
                     "symbol": p.symbol,
                     "name": p.name,
@@ -126,43 +127,48 @@ def render_screener_page(data_manager: DataManager):
                     "latest_price": latest_p,
                     "signal_type": sig.signal_type.value,
                     "is_actionable": sig.is_actionable,
+                    "certainty_score": certainty,
                     "entry_price": sig.candidate_entry_price,
                     "stop_loss": sig.stop_loss_price,
                     "take_profit": sig.take_profit_price,
                     "stop_rationale": sig.stop_loss_rationale,
                     "met_count": len(sig.conditions_met),
                     "pending_count": len(sig.conditions_pending),
-                    "met_details": "; ".join(sig.conditions_met[:2]),
+                    "met_details": "; ".join(sig.conditions_met[:3]),
                     "pending_details": "; ".join(sig.conditions_pending[:2]),
+                    "risks": sig.risks,
                 })
 
         progress_bar.empty()
         status_text.empty()
 
-        # 展示筛选结果
+        # 按确定性评分降序排列
+        results = sorted(results, key=lambda r: (r["is_actionable"], r["certainty_score"]), reverse=True)
+
         actionable_results = [r for r in results if r["is_actionable"]]
         pending_results = [r for r in results if not r["is_actionable"]]
 
         st.markdown(f"### 🎯 扫描结果汇总: 发现 **{len(actionable_results)}** 只候选买点标的")
 
         if actionable_results:
-            st.success("以下标的已完全满足当前波段策略入场条件：")
-            for r in actionable_results:
+            st.success("以下标的已完全满足当前波段策略入场条件，按 AlphaSift 确定性评分优先推荐：")
+            for rank_idx, r in enumerate(actionable_results):
                 with st.container():
                     c1, c2, c3, c4, c5 = st.columns([1.5, 1.2, 1.2, 2.5, 1.2])
-                    c1.markdown(f"**{r['name']}** (`{r['symbol']}`)")
+                    score_badge = f"🔥 确定性: **{r['certainty_score']:.1f}** 分"
+                    c1.markdown(f"**#{rank_idx+1} {r['name']}** (`{r['symbol']}`)<br>{score_badge}", unsafe_allow_html=True)
                     c2.markdown(render_board_badge(r["board_key"], r["board_name"]), unsafe_allow_html=True)
                     c3.markdown(f"现价: **¥{r['latest_price']:.2f}**")
-                    c4.markdown(f"入场参考: ¥{r['entry_price']:.2f} | 止损: **¥{r['stop_loss']:.2f}** | 止盈: **¥{r['take_profit']:.2f}**")
+                    c4.markdown(f"入场参考: ¥{r['entry_price']:.2f} | 止损: **¥{r['stop_loss']:.2f}** | 止盈: **¥{r['take_profit']:.2f}**<br><small style='color: gray;'>依据: {r['stop_rationale']}</small>", unsafe_allow_html=True)
                     if c5.button("➕ 加入自选", key=f"add_scan_{r['symbol']}"):
-                        data_manager.add_to_watchlist(r["symbol"], r["name"], f"【{strat_type}】扫描命中")
+                        data_manager.add_to_watchlist(r["symbol"], r["name"], f"【{strat_name.split('(')[0].strip()}】评分:{r['certainty_score']:.0f}")
                         st.success(f"已加入自选: {r['name']}")
                 st.markdown("<hr style='margin: 4px 0 10px 0;'>", unsafe_allow_html=True)
         else:
-            st.warning("全市场扫描完成，当前暂无标的完全触发该策略入场信号。波段交易最关键的是耐心等待确定性机会，切勿勉强交易。")
+            st.warning("扫描完成，当前暂无标的完全触发该策略入场信号。波段交易最关键的是耐心等待确定性机会，严禁盲目追高开仓。")
 
         # 蓄势观察池
         with st.expander(f"👀 查看蓄势观察池标的 ({len(pending_results)} 只标的接近形成机会)", expanded=False):
             st.caption("提示: 以下标的已满足部分均线或形态条件，但仍需等待放量企稳或价格突破确认：")
             for r in pending_results[:30]:
-                st.markdown(f"- **{r['name']}** (`{r['symbol']}`): 已满足 {r['met_count']} 项，尚缺: `{r['pending_details']}`")
+                st.markdown(f"- **{r['name']}** (`{r['symbol']}` | 确定性 {r['certainty_score']:.1f}分): 已满足 {r['met_count']} 项，尚缺: `{r['pending_details']}`")

@@ -139,3 +139,41 @@ class AIAdvisor:
             offline_result = self.generate_stock_commentary(symbol, name, signal_data, indicators_snapshot)
             offline_result["disclaimer"] += f" (外部大模型调用失败: {str(e)}，已自动降级为本地规则解读)"
             return offline_result
+
+    def generate_portfolio_health_commentary(self, health_summary: Any) -> Dict[str, Any]:
+        """为持仓组合体检生成客观风险解读"""
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 默认离线规则生成
+        lines = [
+            f"### 🛡️ 【持仓组合量化风控体检备忘】",
+            f"- **体检时间**: {now_str}",
+            f"- **组合综合评分**: {health_summary.overall_health_score:.1f} / 100 ({health_summary.overall_risk_rating})",
+            f"- **持仓标的数**: {health_summary.positions_count} 只",
+            f"- **第一重仓占比**: {health_summary.top_stock_weight_pct:.1f}%",
+            f"- **浮动盈亏状态**: {health_summary.total_unrealized_pnl:+.2f} 元 ({health_summary.total_pnl_pct*100:+.2f}%)",
+            "",
+            "#### 一、核心风险预警清单:",
+        ]
+        if health_summary.system_alerts:
+            for alert in health_summary.system_alerts:
+                lines.append(f"  - ⚠️ {alert}")
+        else:
+            lines.append("  - ✅ 组合目前未触发集中度超标或大幅回撤警报")
+
+        lines.append("\n#### 二、调仓与止损建议依据:")
+        high_risk_positions = [p for p in health_summary.detailed_positions if p.risk_level == "HIGH"]
+        if high_risk_positions:
+            for p in high_risk_positions:
+                lines.append(f"  - **{p.name}({p.symbol})**: 浮亏 {p.pnl_pct*100:.1f}%，走势处于【{p.trend_status}】，建议参考止损位 {p.suggested_stop_loss:.2f} 元执行纪律减仓。")
+        else:
+            lines.append("  - 目前各持仓标的均在正常波段波动区间，请继续跟踪移动止损位。")
+
+        return {
+            "is_llm_generated": False,
+            "model_name": "本地因果规则引擎 (严守风控准则)",
+            "generated_at": now_str,
+            "content": "\n".join(lines),
+            "disclaimer": "持仓体检基于历史客观数据与量化风控模型计算，不构成交易建议。严守止损纪律是控制波段风险的第一道防线。",
+        }
+

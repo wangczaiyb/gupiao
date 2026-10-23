@@ -21,9 +21,12 @@ class StockProfile:
     is_delisting: bool = False  # 是否处于退市整理期
     is_suspended: bool = False  # 是否停牌
     list_date: Optional[str] = None  # 上市日期 'YYYY-MM-DD'
+    delist_date: Optional[str] = None  # 退市日期 'YYYY-MM-DD'
     industry: str = "其他"  # 所属行业
     total_shares: float = 0.0  # 总股本 (股)
     circulating_shares: float = 0.0  # 流通股本 (股)
+    amount: float = 0.0  # 最新成交额 (元)
+    turnover_rate: float = 0.0  # 最新换手率 (%)
 
     @property
     def full_code(self) -> str:
@@ -52,9 +55,12 @@ def parse_stock_profile(
     name: str,
     is_suspended: bool = False,
     list_date: Optional[str] = None,
+    delist_date: Optional[str] = None,
     industry: str = "其他",
     total_shares: float = 0.0,
     circulating_shares: float = 0.0,
+    amount: float = 0.0,
+    turnover_rate: float = 0.0,
 ) -> StockProfile:
     """
     解析并构建标准 StockProfile
@@ -72,7 +78,7 @@ def parse_stock_profile(
     # 识别风险警示 (ST, *ST, S*ST, SST)
     name_clean = name.strip()
     is_st = any(st_flag in name_clean for st_flag in ("ST", "*ST", "S*ST", "SST"))
-    is_delisting = "退" in name_clean or "退市" in name_clean
+    is_delisting = "退" in name_clean or "退市" in name_clean or (delist_date is not None and len(delist_date) > 0)
 
     return StockProfile(
         symbol=clean_sym,
@@ -84,10 +90,14 @@ def parse_stock_profile(
         is_delisting=is_delisting,
         is_suspended=is_suspended,
         list_date=list_date,
+        delist_date=delist_date,
         industry=industry,
         total_shares=total_shares,
         circulating_shares=circulating_shares,
+        amount=amount,
+        turnover_rate=turnover_rate,
     )
+
 
 
 def filter_stock_pool(

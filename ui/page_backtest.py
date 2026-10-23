@@ -1,34 +1,46 @@
 """
 页面 4: 策略回测与验证分析 (Backtest & Performance Analytics)
-满足首版重点要求：
-1. 真实 T+1 与下一交易日开盘 (Next-Bar) 撮合执行
+满足重点要求：
+1. 真实 T+1 与下一交易日开盘 (Next-Bar) 撮合执行，杜绝当日收盘偷价
 2. 同日触及止损止盈采用保守假设 (先触及止损)
 3. 跳空跌破止损以实际开盘价撮合
-4. 佣金 (含5元最低限制)、印花税、过户费与滑点真实扣除
-5. 多股票组合共享账户资金池
-6. 样本内/样本外区间对比与基准指数 (沪深300) 收益对比
+4. 佣金 (可配置最低限制)、印花税、过户费与滑点真实扣除
+5. 多股票组合共享账户资金池与跨标的确定性优先排序
+6. 样本内/样本外区间对比与多基准指数 (沪深300/中证500/中证1000) 对比
+7. 集成 AKQuant 独立验证适配器
 """
 
 from datetime import date, datetime
 import streamlit as st
 import pandas as pd
 
+from core.akquant_adapter import AKQuantAdapter
 from core.backtest_engine import BacktestEngine
 from core.strategies.range_breakout import RangeBreakoutStrategy
+from core.strategies.rs_momentum import RSMomentumStrategy
 from core.strategies.trend_pullback import TrendPullbackStrategy
+from core.strategies.volatility_contraction import VolatilityContractionStrategy
 from data_provider.manager import DataManager
 from ui.charts import create_equity_curve_chart
 
 
 def render_backtest_page(data_manager: DataManager):
     st.markdown("## 🧪 策略回测与稳健性检验")
-    st.caption("提示: 本回测引擎严格遵循 A 股交易制度（T+1、板块申报单位、跌停无法卖出、涨停无法买入、跳空滑点与最保守同日止损假设），杜绝未来数据偷价。")
+    st.caption("高精度因果撮合 · T+1 卖出锁定 · 跨标的排序 · 多基准对比 · AKQuant 双引擎校验")
 
     # 1. 回测配置侧边栏/折叠卡片
     with st.expander("⚙️ 回测参数与执行假设配置", expanded=True):
         c1, c2, c3 = st.columns(3)
         with c1:
-            strat_name = st.selectbox("回测策略选择", ["趋势回调观察策略", "区间突破观察策略"])
+            strat_name = st.selectbox(
+                "回测策略选择",
+                [
+                    "趋势回调观察策略",
+                    "区间突破观察策略",
+                    "相对强度动量策略",
+                    "波动收缩突破策略",
+                ],
+            )
             universe_mode = st.selectbox("测试标的池", ["自选股全组合 (多标的共享资金)", "单一标的深度回测"])
             if universe_mode == "单一标的深度回测":
                 single_symbol = st.text_input("输入测试股票代码", value="600519")
@@ -41,44 +53,28 @@ def render_backtest_page(data_manager: DataManager):
             split_ratio = st.slider("样本内/样本外验证切分 (Train/Test Split)", min_value=0.5, max_value=0.9, value=0.7, step=0.05, help="前 N% 数据用于规则观察，后 (1-N)% 用于盲测验证")
 
         with c3:
-            init_cap = st.number_input("初始模拟本金 (元)", value=100000.0, step=10000.0)
+            init_cap = st.number_input("初始模拟本金 (元)", value=50000.0, step=5000.0)
             comm_rate = st.number_input("佣金费率", value=0.00025, format="%.5f", help="万 2.5")
+            min_comm = st.selectbox("最低佣金限制", [5.0, 1.0, 0.0], index=0, format_func=lambda x: f"¥{x:.1f} 元")
             slippage = st.number_input("滑点估算比例", value=0.0005, format="%.4f", help="0.05% 滑点")
+            benchmark_choice = st.selectbox("对比基准指数", ["000300 (沪深300)", "000905 (中证500)", "000852 (中证1000)"])
 
-    # 2. 策略具体参数调优 (非必须，可按需修改)
-    with st.expander("🛠️ 策略底层量化参数微调 (默认参数为经典学术与实盘基准)"):
-        p_col1, p_col2 = st.columns(2)
-        if strat_name == "趋势回调观察策略":
-            with p_col1:
-                p_fast = st.slider("短期均线周期 EMA", 10, 30, 20)
-                p_mid = st.slider("中期趋势均线 EMA", 30, 80, 50)
-                p_slow = st.slider("长期基准均线 EMA", 90, 180, 120)
-            with p_col2:
-                p_rsi_min = st.slider("RSI 吸纳下限", 30.0, 45.0, 38.0)
-                p_rsi_max = st.slider("RSI 吸纳上限", 50.0, 65.0, 58.0)
-                p_vol_mult = st.slider("企稳放量系数", 0.9, 1.5, 1.05)
-            strategy = TrendPullbackStrategy({
-                "ema_fast": p_fast, "ema_mid": p_mid, "ema_slow": p_slow,
-                "rsi_min": p_rsi_min, "rsi_max": p_rsi_max, "vol_factor": p_vol_mult,
-            })
-        else:
-            with p_col1:
-                p_chan = st.slider("唐奇安箱体周期", 15, 60, 20)
-                p_squeeze = st.slider("突破前布林带宽上限", 0.15, 0.35, 0.22)
-            with p_col2:
-                p_vol_break = st.slider("突破放量倍数", 1.2, 2.5, 1.75)
-                p_max_rsi = st.slider("RSI 超买过滤上限", 75.0, 90.0, 82.0)
-            strategy = RangeBreakoutStrategy({
-                "channel_period": p_chan, "squeeze_bandwidth": p_squeeze,
-                "vol_breakout_mult": p_vol_break, "max_rsi": p_max_rsi,
-            })
+    # 2. 策略具体参数
+    if "趋势回调" in strat_name:
+        strategy = TrendPullbackStrategy()
+    elif "区间突破" in strat_name:
+        strategy = RangeBreakoutStrategy()
+    elif "相对强度" in strat_name:
+        strategy = RSMomentumStrategy()
+    else:
+        strategy = VolatilityContractionStrategy()
 
     # 3. 运行回测按钮
     if st.button("🚀 启动高保真回测模拟", type="primary", use_container_width=True):
         engine = BacktestEngine(
             initial_capital=init_cap,
             commission_rate=comm_rate,
-            min_commission=5.0,
+            min_commission=min_comm,
             slippage_rate=slippage,
         )
 
@@ -97,8 +93,8 @@ def render_backtest_page(data_manager: DataManager):
                     if len(df) > 0:
                         stock_dfs[sym] = df
 
-            # 加载沪深300作为比较基准
-            bench_df = data_manager.get_benchmark_bars("000300", start_date=str(start_dt))
+            bench_code = benchmark_choice.split()[0]
+            bench_df = data_manager.get_benchmark_bars(bench_code, start_date=str(start_dt))
 
         if not stock_dfs:
             st.error("未能获取到测试标的在所选日期区间的有效日线数据，请检查日期或代码。")
@@ -127,12 +123,20 @@ def render_backtest_page(data_manager: DataManager):
         # 5. 样本外验证与基准超额对比
         st.markdown("#### 🎯 样本外验证与基准超额对比")
         sub_c1, sub_c2, sub_c3, sub_c4 = st.columns(4)
-        sub_c1.metric("基准指数 (沪深300) 收益", f"{metrics.benchmark_return_pct*100:.2f}%" if metrics.benchmark_return_pct is not None else "暂无")
+        sub_c1.metric(f"基准指数 ({benchmark_choice.split()[0]}) 收益", f"{metrics.benchmark_return_pct*100:.2f}%" if metrics.benchmark_return_pct is not None else "暂无")
         sub_c2.metric("超越基准 Alpha", f"{metrics.alpha_pct*100:.2f}%" if metrics.alpha_pct is not None else "暂无", delta_color="normal")
         sub_c3.metric("样本内 (Train) 收益", f"{metrics.in_sample_return_pct*100:.2f}%" if metrics.in_sample_return_pct is not None else "暂无")
         sub_c4.metric("样本外 (Test) 收益", f"{metrics.out_of_sample_return_pct*100:.2f}%" if metrics.out_of_sample_return_pct is not None else "暂无")
 
-        st.caption(f"🛡️ 回测期间累计扣除实际规费与交易费用: **¥{metrics.total_fees_paid:.2f} 元** (印花税减半 0.05%、过户费 0.001%、最低佣金 5 元及真实滑点)")
+        st.caption(f"🛡️ 回测期间累计扣除实际规费与交易费用: **¥{metrics.total_fees_paid:.2f} 元** (印花税减半 0.05%、过户费 0.001%、最低佣金 {min_comm:.1f} 元及真实滑点)")
+
+        # AKQuant 交叉验证状态
+        akq_adapter = AKQuantAdapter()
+        akq_res = akq_adapter.validate_backtest(stock_dfs, initial_capital=init_cap)
+        if akq_res.is_available:
+            st.success(f"⚖️ {akq_res.status_message}")
+        else:
+            st.info(f"ℹ️ {akq_res.status_message}")
 
         # 6. 净值走势曲线与回撤图
         st.markdown("#### 📈 组合累计净值曲线 vs 基准走势")

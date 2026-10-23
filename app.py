@@ -21,6 +21,7 @@ from ui.components import inject_custom_css
 from ui.page_backtest import render_backtest_page
 from ui.page_overview import render_overview_page
 from ui.page_paper_trading import render_paper_trading_page
+from ui.page_portfolio_health import render_portfolio_health_page
 from ui.page_screener import render_screener_page
 from ui.page_settings import render_settings_page
 from ui.page_stock_detail import render_stock_detail_page
@@ -40,7 +41,7 @@ def get_system_components():
     """初始化并缓存核心单例服务"""
     data_mgr = DataManager(db_path="data/stock_analysis.db", cache_dir="data/cache")
     paper_mgr = PaperAccountManager(db_path="data/stock_analysis.db", initial_capital=100000.0)
-    risk_mgr = RiskManager(RiskBudgetConfig(total_capital=100000.0))
+    risk_mgr = RiskManager(RiskBudgetConfig(total_capital=5000.0))
     ai_adv = AIAdvisor()
     return data_mgr, paper_mgr, risk_mgr, ai_adv
 
@@ -62,6 +63,7 @@ def main():
                 "📊 市场总览与自选",
                 "📈 股票详情与分析",
                 "🔍 策略选股与扫描",
+                "🩺 智能持仓体检与风控",
                 "🧪 历史回测与检验",
                 "💼 模拟交易与复盘",
                 "⚙️ 系统设置与诊断",
@@ -79,7 +81,7 @@ def main():
         """)
 
         st.markdown("---")
-        st.caption("版本: v1.0.0 | 开源协议: MIT | 资金标示: 模拟演练")
+        st.caption("版本: v2.0.0 | 开源协议: MIT | 资金标示: 模拟演练")
 
     # 路由渲染页面
     if nav_choice == "📊 市场总览与自选":
@@ -88,12 +90,15 @@ def main():
         render_stock_detail_page(data_manager, paper_manager, risk_manager, ai_advisor)
     elif nav_choice == "🔍 策略选股与扫描":
         render_screener_page(data_manager)
+    elif nav_choice == "🩺 智能持仓体检与风控":
+        render_portfolio_health_page(data_manager, ai_advisor)
     elif nav_choice == "🧪 历史回测与检验":
         render_backtest_page(data_manager)
     elif nav_choice == "💼 模拟交易与复盘":
         render_paper_trading_page(data_manager, paper_manager)
     elif nav_choice == "⚙️ 系统设置与诊断":
         render_settings_page(data_manager, risk_manager, ai_advisor)
+
 
 
 if __name__ == "__main__":

@@ -6,12 +6,12 @@
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
-from core.rules import round_trade_quantity, calculate_trade_cost
+from core.rules import round_trade_quantity, calculate_trade_cost, classify_symbol, get_board_rules
 
 
 @dataclass
 class RiskBudgetConfig:
-    total_capital: float = 100000.0  # 模拟资金总额 (元，严格标明为模拟资金)
+    total_capital: float = 5000.0  # 模拟资金总额 (默认小资金 5000 元，支持自定义)
     risk_per_trade_pct: float = 0.015  # 单笔允许最大本金亏损比例 (默认 1.5%)
     max_single_stock_pct: float = 0.25  # 单只股票持仓金额占总资金上限 (默认 25%)
     max_total_position_pct: float = 0.85  # 组合总持仓上限 (默认 85%，保留 15% 现金安全垫)
@@ -19,7 +19,15 @@ class RiskBudgetConfig:
     max_industry_exposure_pct: float = 0.40  # 单一行业最大暴露度 (默认 40%)
     max_drawdown_stop_trading_pct: float = 0.15  # 组合累计回撤达到此阈值时强制暂停开仓警报
     commission_rate: float = 0.00025  # 佣金率
-    min_commission: float = 5.0  # 最低佣金
+    min_commission: float = 5.0  # 最低佣金 (可配置 0/1/5 元)
+    user_permissions: Dict[str, bool] = field(default_factory=lambda: {
+        "SH_MAIN": True,
+        "SZ_MAIN": True,
+        "CHINEXT": True,
+        "STAR": False,
+        "BSE": False,
+    })
+
 
 
 @dataclass
@@ -97,6 +105,11 @@ class RiskManager:
                 failed_checks=["多头止损价必须严格低于入场参考价"],
             )
 
+        # 检查板块交易权限
+        board_key, _, board_name = classify_symbol(symbol)
+        if not self.config.user_permissions.get(board_key, True):
+            failed_checks.append(f"板块权限限制：当前账户未勾选开通 [{board_name}] 交易权限，禁止开仓")
+
         risk_per_share = entry_price - stop_loss_price
         stop_loss_ratio = risk_per_share / entry_price
 
@@ -153,20 +166,54 @@ class RiskManager:
         valid_shares = round_trade_quantity(int(capped_shares), symbol, is_buy=True)
 
         if valid_shares <= 0:
-            failed_checks.append("根据风控资金限制与最小申报规则，可分配数量为 0 股 (现金不足或风险距离过大)")
+            try:
+                board_rule = get_board_rules(symbol)
+                min_buy_qty = board_rule.min_buy_qty
+            except Exception:
+                min_buy_qty = 100
+
+            min_lot_cash = min_buy_qty * entry_price
+            if min_lot_cash > current_cash:
+                failed_checks.append(
+                    f"整手资金不足：该标的最低申报 {min_buy_qty} 股，买入一手需 {min_lot_cash:.2f} 元，超过当前可用现金 {current_cash:.2f} 元"
+                )
+            elif min_lot_cash > single_stock_max_amount:
+                failed_checks.append(
+                    f"整手超单票上限：一手所需资金 {min_lot_cash:.2f} 元超过单票上限 {single_stock_max_amount:.2f} 元"
+                )
+            else:
+                failed_checks.append(
+                    f"单笔风险预算限制：根据单笔风险比例 {self.config.risk_per_trade_pct*100:.1f}%，计算出的股数未达最低申报量 {min_buy_qty} 股"
+                )
             valid_shares = 0
 
         trade_amount = valid_shares * entry_price
         position_pct = trade_amount / total_capital if total_capital > 0 else 0.0
 
         # 计算双边费用与预估实际亏损
-        buy_fee = calculate_trade_cost(trade_amount, is_buy=True, commission_rate=self.config.commission_rate)
+        buy_fee = calculate_trade_cost(
+            trade_amount,
+            is_buy=True,
+            commission_rate=self.config.commission_rate,
+            min_commission=self.config.min_commission,
+        )
         sell_amount_stop = valid_shares * stop_loss_price
-        sell_fee = calculate_trade_cost(sell_amount_stop, is_buy=False, commission_rate=self.config.commission_rate)
+        sell_fee = calculate_trade_cost(
+            sell_amount_stop,
+            is_buy=False,
+            commission_rate=self.config.commission_rate,
+            min_commission=self.config.min_commission,
+        )
         total_fees = buy_fee.total_fee + sell_fee.total_fee
+
+        if trade_amount > 0 and (total_fees / trade_amount) > 0.003:
+            warnings.append(
+                f"小资金交易规费占比较高：预估双边费用 ({total_fees:.2f}元) 占成交金额比例达 {total_fees/trade_amount*100:.2f}% (受最低佣金 {self.config.min_commission:.1f}元 影响)，易侵蚀波段利润"
+            )
 
         loss_at_stop = (valid_shares * risk_per_share) + total_fees
         loss_pct = loss_at_stop / total_capital if total_capital > 0 else 0.0
+
 
         # 细化风控检查结果
         if trade_amount > current_cash:
