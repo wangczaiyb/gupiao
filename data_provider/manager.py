@@ -9,10 +9,13 @@
 
 from datetime import date, datetime, timedelta
 import json
+import logging
 import os
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
+
+logger = logging.getLogger("DataManager")
 
 from core.indicators import compute_all_indicators
 from core.rules import classify_symbol
@@ -217,8 +220,8 @@ class DataManager:
                             if compute_indicators:
                                 sub_df = compute_all_indicators(sub_df)
                             return sub_df, f"本地高速磁盘缓存 (更新于 {latest_cached_date})"
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"读取本地 Parquet 缓存异常 ({cache_file}): {e}，自动降级为重新抓取")
 
         # 2. 调用主数据源 AKShare
         source_name = "AKShare"
@@ -246,8 +249,8 @@ class DataManager:
         # 写入缓存
         try:
             df.to_parquet(cache_file, index=False)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"写入 Parquet 缓存失败 ({cache_file}): {e}，请确认已安装 pyarrow 且目录具有写入权限")
 
         if compute_indicators:
             df = compute_all_indicators(df)

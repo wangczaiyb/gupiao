@@ -85,3 +85,22 @@ def test_range_breakout_evaluation():
     assert sig.candidate_entry_price > 0
     assert sig.stop_loss_price < sig.candidate_entry_price
     assert "突破" in sig.stop_loss_rationale
+
+
+def test_trend_pullback_rejects_severe_breakdown_below_ema20():
+    """测试当股价严重破位跌破 EMA20 时，策略必须正确识别为待满足/失效，不能因缺少负向约束误判为买入"""
+    df = _create_uptrend_pullback_df()
+    # 模拟最新一天的最低价和收盘价严重下砸破位，跌破 EMA20 达到 8%
+    df_broken = df.copy()
+    ema20_val = df_broken["ema_20"].iloc[-1]
+    df_broken.loc[df_broken.index[-1], "low"] = ema20_val * 0.90  # 跌破 10%
+    df_broken.loc[df_broken.index[-1], "close"] = ema20_val * 0.92
+
+    strat = TrendPullbackStrategy({"pullback_margin": 0.02})
+    sig = strat.evaluate_latest(df_broken, "600519")
+
+    # 绝不能生成有效买入信号
+    assert not sig.is_actionable
+    # 待满足条件中必须指出跌破 EMA20 支撑
+    assert any("跌破 EMA20" in cond for cond in sig.conditions_pending)
+

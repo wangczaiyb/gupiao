@@ -241,3 +241,76 @@ def test_backtest_reproducibility():
     assert len(t1) == len(t2)
     assert t1[0].net_pnl == t2[0].net_pnl
 
+
+def test_backtest_st_and_ipo_price_limit_propagation():
+    """测试回测引擎正确接收并应用 ST (5%涨停) 与无涨跌幅限制状态"""
+    # 构造标的：主板股票，前收 10.00，次日开盘 10.50 (刚好涨 5.0%)
+    # 若 is_st=True，则 10.50 属于一字涨停，必须被拦截禁止开盘买入！
+    df_st = pd.DataFrame({
+        "date": ["2024-05-13", "2024-05-14"],
+        "open": [10.0, 10.50],
+        "high": [10.0, 10.50],
+        "low": [10.0, 10.50],
+        "close": [10.0, 10.50],
+        "prev_close": [10.0, 10.0],
+        "is_st": [True, True],
+        "volume": [10000.0, 10000.0],
+        "amount": [100000.0, 105000.0],
+    })
+    strat = MockDeterministicStrategy(buy_on_date="2024-05-13", stop_loss=9.0, take_profit=11.5)
+    engine = BacktestEngine(initial_capital=100000.0)
+
+    # 运行回测：由于次日一字涨停 (5% 涨停限制)，买入应被限制拦截
+    _, _, trades = engine.run_portfolio({"600000": df_st}, strat)
+    assert len(trades) == 0  # 成功拦截，无法开盘买入
+
+
+def test_backtest_cross_stock_signal_ranking_priority():
+    """测试同日多标的买入信号按确定性/优先级排序，高分标的优先消耗资金与配额"""
+    class ScoredMockStrategy(BaseStrategy):
+        def __init__(self, scores: dict):
+            super().__init__(name="ScoredMockStrategy")
+            self.scores = scores
+
+        def get_description(self): return {}
+
+        def evaluate_latest(self, df: pd.DataFrame, symbol: str) -> StrategySignal:
+            cur_date = str(df["date"].iloc[-1])[:10]
+            close = float(df["close"].iloc[-1])
+            return StrategySignal(
+                symbol=symbol,
+                date=cur_date,
+                signal_type=SignalType.BUY,
+                strategy_name=self.name,
+                candidate_entry_price=close,
+                stop_loss_price=close * 0.95,
+                take_profit_price=close * 1.10,
+                priority_score=self.scores.get(symbol, 0.0),
+            )
+
+        def generate_signals(self, df: pd.DataFrame, symbol: str) -> List[StrategySignal]:
+            return [self.evaluate_latest(df.iloc[:1], symbol)]
+
+    df1 = pd.DataFrame({
+        "date": ["2024-05-13", "2024-05-14", "2024-05-15"],
+        "open": [10.0, 10.0, 11.5], "high": [10.0, 10.5, 12.0], "low": [10.0, 9.8, 11.0], "close": [10.0, 10.2, 11.8],
+        "volume": [10000.0, 10000.0, 10000.0], "amount": [100000.0, 100000.0, 118000.0],
+    })
+    df2 = pd.DataFrame({
+        "date": ["2024-05-13", "2024-05-14", "2024-05-15"],
+        "open": [20.0, 20.0, 23.0], "high": [20.0, 20.5, 24.0], "low": [20.0, 19.8, 22.5], "close": [20.0, 20.2, 23.5],
+        "volume": [10000.0, 10000.0, 10000.0], "amount": [200000.0, 200000.0, 235000.0],
+    })
+
+    # 给 000001 打高分 95.0，给 600519 打低分 50.0
+    strat = ScoredMockStrategy(scores={"600519": 50.0, "000001": 95.0})
+    # 限制最大持仓标的数为 1 (只能买入得分更高的一只)
+    engine = BacktestEngine(initial_capital=100000.0, max_concurrent_positions=1)
+
+    m, eq, t = engine.run_portfolio({"600519": df1, "000001": df2}, strat)
+    assert len(t) == 1
+    # 验证实际入场并最终结算是高得分的 000001
+    assert t[0].symbol == "000001"
+
+
+

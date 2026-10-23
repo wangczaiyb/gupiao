@@ -32,6 +32,7 @@ class StrategySignal:
     conditions_pending: List[str] = field(default_factory=list)  # 尚未满足/待观察条件
     risks: List[str] = field(default_factory=list)  # 主要风险提示
     metrics: Dict[str, Any] = field(default_factory=dict)  # 当日指标快照
+    priority_score: float = 0.0  # 候选信号排序/确定性评分 (用于跨标的资金竞争)
 
     @property
     def is_actionable(self) -> bool:

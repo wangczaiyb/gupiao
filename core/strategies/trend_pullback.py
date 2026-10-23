@@ -92,13 +92,21 @@ class TrendPullbackStrategy(BaseStrategy):
         else:
             conditions_pending.append(f"等待均线形成多头排列 (当前 EMA20={ema_f:.2f}, EMA50={ema_m:.2f}, EMA120={ema_s:.2f})")
 
-        # 条件 2: 回踩支撑
+        # 条件 2: 回踩支撑 (增加负向边界约束，防止深度破位暴跌被错误识别为回踩)
         dist_to_ema20 = (low - ema_f) / ema_f if ema_f > 0 else 0.0
-        pullback_ok = dist_to_ema20 <= self.params["pullback_margin"] and close >= (ema_m * 0.98)
+        margin = self.params["pullback_margin"]
+        pullback_ok = (-margin <= dist_to_ema20 <= margin) and close >= (ema_m * 0.98)
         if pullback_ok:
             conditions_met.append(f"价格完成回踩支撑 (回踩至 EMA20 距离 {dist_to_ema20*100:.1f}%)")
         else:
-            conditions_pending.append(f"价格尚未回踩至支撑位附近 (当前回踩距离 {dist_to_ema20*100:.1f}%，目标 ≤ {self.params['pullback_margin']*100:.1f}%)")
+            if dist_to_ema20 < -margin:
+                conditions_pending.append(
+                    f"价格跌破 EMA20 支撑位 (偏离度 {dist_to_ema20*100:.1f}% < 允许容忍下限 -{margin*100:.1f}%)，需等待重新站稳"
+                )
+            else:
+                conditions_pending.append(
+                    f"价格尚未回踩至支撑位附近 (当前偏离 EMA20 +{dist_to_ema20*100:.1f}%，目标 ≤ +{margin*100:.1f}%)"
+                )
 
         # 条件 3: RSI 动量重置
         rsi_ok = self.params["rsi_min"] <= rsi <= self.params["rsi_max"]

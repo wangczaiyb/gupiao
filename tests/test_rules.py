@@ -120,3 +120,22 @@ def test_price_limits_and_restrictions():
     restricted, msg = is_trade_restricted(10.0, 11.0, 9.0, is_buy=True, is_suspended=True)
     assert restricted is True
     assert "停牌" in msg
+
+
+def test_unknown_symbol_handling():
+    """测试未知证券代码处理：明确报错与安全截断，禁止静默当作沪市主板"""
+    # 1. 尝试获取未知代码板块规则抛出 ValueError
+    with pytest.raises(ValueError, match="未知或无法识别的证券代码"):
+        get_board_rules("999999")
+
+    with pytest.raises(ValueError, match="未知或无法识别的证券代码"):
+        get_board_rules("INVALID_CODE")
+
+    # 2. 数量规整时对未知代码安全返回 0，禁止产生有效申报
+    assert round_trade_quantity(100, "999999", is_buy=True) == 0
+    assert round_trade_quantity(100, "INVALID_CODE", is_buy=True) == 0
+
+    # 3. 涨跌停计算对未知代码返回 (0.0, 0.0)
+    up, down = calculate_price_limits(10.0, "999999")
+    assert up == 0.0 and down == 0.0
+

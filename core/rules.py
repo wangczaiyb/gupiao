@@ -109,9 +109,11 @@ def classify_symbol(symbol: str) -> Tuple[str, str, str]:
 
 
 def get_board_rules(symbol: str) -> BoardRules:
-    """获取指定代码对应的板块交易规则"""
+    """获取指定代码对应的板块交易规则，未知代码明确抛出 ValueError，不静默当作沪市主板"""
     board_key, _, _ = classify_symbol(symbol)
-    return BOARD_RULES.get(board_key, BOARD_RULES["SH_MAIN"])
+    if board_key not in BOARD_RULES:
+        raise ValueError(f"未知或无法识别的证券代码: '{symbol}'，无法按沪市主板等特定规则静默处理")
+    return BOARD_RULES[board_key]
 
 
 def round_trade_quantity(qty: int, symbol: str, is_buy: bool = True) -> int:
@@ -119,11 +121,16 @@ def round_trade_quantity(qty: int, symbol: str, is_buy: bool = True) -> int:
     按照板块规则规范化申报数量
     - 买入必须满足最小申报股数与递增单位
     - 卖出若持有零股可全额卖出
+    - 若代码无法识别则返回 0，杜绝静默按主板成交
     """
     if qty <= 0:
         return 0
 
-    rules = get_board_rules(symbol)
+    try:
+        rules = get_board_rules(symbol)
+    except ValueError:
+        return 0
+
     if is_buy:
         if qty < rules.min_buy_qty:
             return 0  # 未达到最小申报量
@@ -253,7 +260,11 @@ def calculate_price_limits(
     if is_ipo_unlimited:
         return round(prev_close * 10.0, 2), 0.01
 
-    rules = get_board_rules(symbol)
+    try:
+        rules = get_board_rules(symbol)
+    except ValueError:
+        return 0.0, 0.0
+
     ratio = rules.st_price_limit_ratio if is_st else rules.price_limit_ratio
 
     # A 股涨跌停价格依据中国结算规范：精确到0.01元，四舍五入

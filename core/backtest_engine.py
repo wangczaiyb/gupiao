@@ -228,9 +228,13 @@ class BacktestEngine:
                 cur_close = float(bar["close"])
                 is_suspended = bool(bar.get("is_suspended", False))
 
-                # 检查跌停限制
+                # 检查跌停限制 (完整传入 ST 状态与新股上市无涨跌幅窗口)
                 prev_close = float(bar.get("prev_close", cur_open))
-                _, limit_down = calculate_price_limits(prev_close, sym)
+                is_st_bar = bool(bar.get("is_st", False))
+                is_ipo_unlimited_bar = bool(bar.get("is_ipo_unlimited", False))
+                _, limit_down = calculate_price_limits(
+                    prev_close, sym, is_st=is_st_bar, is_ipo_unlimited=is_ipo_unlimited_bar
+                )
                 is_restricted, _ = is_trade_restricted(cur_open, 99999.0, limit_down, is_buy=False, is_suspended=is_suspended)
 
                 # 验证是否符合 T+1 可卖日期
@@ -328,8 +332,20 @@ class BacktestEngine:
                 prev_date = sorted_dates[i - 1]
                 pending_signals = signals_by_date.get(prev_date, [])
 
+                # 跨标的确定性排序：当多个标的同日触发买入信号时，依据优先得分、预期盈亏比、量比及代码确定性排序
+                sorted_pending_signals = sorted(
+                    pending_signals,
+                    key=lambda s: (
+                        getattr(s, "priority_score", 0.0) or 0.0,
+                        (s.take_profit_price - s.candidate_entry_price) / max(0.01, s.candidate_entry_price - s.stop_loss_price) if s.candidate_entry_price > s.stop_loss_price else 0.0,
+                        getattr(s, "metrics", {}).get("vol_ratio", 0.0) or 0.0,
+                        s.symbol,
+                    ),
+                    reverse=True,
+                )
+
                 # 遍历前一日生成的信号
-                for sig in pending_signals:
+                for sig in sorted_pending_signals:
                     sym = sig.symbol
                     if sym in open_positions:
                         continue  # 已有持仓，不重复开仓加仓
@@ -343,9 +359,13 @@ class BacktestEngine:
                     cur_open = float(bar["open"])
                     is_suspended = bool(bar.get("is_suspended", False))
                     prev_close = float(bar.get("prev_close", cur_open))
+                    is_st_bar = bool(bar.get("is_st", False))
+                    is_ipo_unlimited_bar = bool(bar.get("is_ipo_unlimited", False))
 
-                    # 检查一字涨停限制 (涨停开盘买不进)
-                    limit_up, _ = calculate_price_limits(prev_close, sym)
+                    # 检查一字涨停限制 (涨停开盘买不进，严格适配 ST 与新股窗口)
+                    limit_up, _ = calculate_price_limits(
+                        prev_close, sym, is_st=is_st_bar, is_ipo_unlimited=is_ipo_unlimited_bar
+                    )
                     is_restricted, _ = is_trade_restricted(cur_open, limit_up, 0.0, is_buy=True, is_suspended=is_suspended)
                     if is_restricted:
                         continue  # 开盘触及涨停或停牌，无法买入
